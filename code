@@ -1,0 +1,150 @@
+#include <WiFiS3.h>
+#include <ThreeWire.h>
+#include <RtcDS1302.h>
+
+/* ---------- WIFI ---------- */
+char ssid[] = "iPhone";
+char pass[] = "12345678900";
+WiFiClient client;
+const char* server = "api.thingspeak.com";
+String apiKey = "F93N81ZV09W85NI8";
+
+unsigned long lastSend = 0;
+const unsigned long interval = 15000;  // ThingSpeak limit
+
+/* ---------- PIN DEFINITIONS ---------- */
+#define TRIG_PIN       3
+#define ECHO_PIN       4
+#define TILT_PIN       5
+#define RTC_CLK        6
+#define RTC_DAT        7
+#define RTC_RST        8
+#define GREEN_LED      9
+#define YELLOW_LED     10
+#define RED_LED        11
+#define VIBRATION_PIN  A0
+
+/* ---------- RTC ---------- */
+ThreeWire myWire(RTC_DAT, RTC_CLK, RTC_RST);
+RtcDS1302<ThreeWire> rtc(myWire);
+
+/* ---------- SECURITY STATES ---------- */
+enum SecurityState {
+  SAFE = 5,
+  SUSPICIOUS = 1,
+  INTRUSION = 2
+};
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial);
+
+  /* ---------- PIN MODES ---------- */
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(TILT_PIN, INPUT_PULLUP);
+  pinMode(VIBRATION_PIN, INPUT);
+
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(YELLOW_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+
+  /* ---------- RTC ---------- */
+  rtc.Begin();
+  if (!rtc.GetIsRunning()) rtc.SetIsRunning(true);
+  if (!rtc.IsDateTimeValid()) rtc.SetDateTime(RtcDateTime(__DATE__, __TIME__));
+
+  /* ---------- WIFI ---------- */
+  Serial.print("Connecting to WiFi");
+  while (WiFi.begin(ssid, pass) != WL_CONNECTED) {
+    delay(5000);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected");
+
+  Serial.println("Smart Home Intrusion System Started");
+}
+
+void loop() {
+
+  /* ---------- ULTRASONIC ---------- */
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  int distance = (duration == 0) ? -1 : duration * 0.034 / 2;
+
+  /* ---------- VIBRATION ---------- */
+  int vibration = analogRead(VIBRATION_PIN);
+
+  /* ---------- TILT ---------- */
+  bool tilt = digitalRead(TILT_PIN) == LOW;
+
+  /* ---------- RTC ---------- */
+  RtcDateTime now = rtc.GetDateTime();
+  bool night = (now.Hour() >= 22 || now.Hour() <= 6);
+
+  /* ---------- SECURITY LOGIC ---------- */
+  SecurityState state;
+
+  if (distance > 0 && distance < 100 && night) {
+    state = INTRUSION;
+  }
+  else if (tilt || vibration > 600) {
+    state = SUSPICIOUS;
+  }
+  else {
+    state = SAFE;
+  }
+
+  /* ---------- LED OUTPUT ---------- */
+  digitalWrite(GREEN_LED,  state == SAFE);
+  digitalWrite(YELLOW_LED, state == SUSPICIOUS);
+  digitalWrite(RED_LED,    state == INTRUSION);
+
+  /* ---------- SERIAL MONITOR ---------- */
+  Serial.println("---------- STATUS ----------");
+  Serial.print("Time       : ");
+  Serial.print(now.Hour()); Serial.print(":");
+  Serial.print(now.Minute()); Serial.print(":");
+  Serial.println(now.Second());
+
+  Serial.print("Distance   : "); Serial.println(distance);
+  Serial.print("Vibration  : "); Serial.println(vibration);
+  Serial.print("Tilt       : "); Serial.println(tilt ? "YES" : "NO");
+  Serial.print("Night      : "); Serial.println(night ? "YES" : "NO");
+
+  Serial.print("State      : ");
+  if (state == SAFE) Serial.println("SAFE");
+  else if (state == SUSPICIOUS) Serial.println("SUSPICIOUS");
+  else Serial.println("INTRUSION");
+
+  Serial.println("----------------------------");
+
+  /* ---------- THINGSPEAK SEND ---------- */
+  if (millis() - lastSend > interval && WiFi.status() == WL_CONNECTED) {
+
+    if (client.connect(server, 80)) {
+      String url = "/update?api_key=" + apiKey +
+                   "&field1=" + String(distance) +
+                   "&field2=" + String(vibration) +
+                   "&field3=" + String(state);
+
+      client.print(String("GET ") + url + " HTTP/1.1\r\n" +
+                   "Host: " + server + "\r\n" +
+                   "Connection: close\r\n\r\n");
+
+      Serial.println("Data sent to ThingSpeak");
+    } else {
+      Serial.println("ThingSpeak connection failed");
+    }
+
+    client.stop();
+    lastSend = millis();
+  }
+
+  delay(2000);
+}
